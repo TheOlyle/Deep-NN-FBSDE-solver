@@ -172,3 +172,4 @@ class NaisNet(nn.Module):
             return out
 
         return out
+
