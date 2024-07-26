@@ -1,3 +1,7 @@
+"""
+This is different from the paper's original BlackScholesBarenBlatt100D.py
+"""
+
 import sys
 import os
 sys.path.append(os.path.abspath("Algorithms/"))
