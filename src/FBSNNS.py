@@ -171,7 +171,7 @@ class FBSNN(ABC):
         # Store the initial state and the network output
         X_list.append(X0)
         Y_list.append(Y0)
-
+        
         # Iterate over each time step
         for n in range(0, self.N):
             # Next time step and Brownian motion increment
@@ -255,8 +255,8 @@ class FBSNN(ABC):
         W = np.cumsum(DW, axis=1)  # Cumulative Brownian motion for each trajectory, time snapshot, and dimension. 
 
         # Convert the numpy arrays to PyTorch tensors and transfer them to the configured device (CPU or GPU)
-        t = torch.from_numpy(t).float().to(self.device)
-        W = torch.from_numpy(W).float().to(self.device)
+        t = torch.from_numpy(t).float().to(self.device) # M x (N+1) x 1
+        W = torch.from_numpy(W).float().to(self.device) # M x (N+1) x D
 
         # Return the time values and Brownian paths.
         return t, W
@@ -293,7 +293,7 @@ class FBSNN(ABC):
             # hece, zero_grad()
             self.optimizer.zero_grad()
 
-            # Fetch a minibatch of time steps and Brownian motion paths - given they get FULL matrices, not sure why they define this within the loop
+            # Fetch a minibatch of time steps and Brownian motion paths - they retrieve these each training epoch
             t_batch, W_batch = self.fetch_minibatch()  # M x (N+1) x 1, M x (N+1) x D
 
             # Compute the loss for the CURRENT batch
