@@ -10,14 +10,15 @@ from Models import *
 
 from src.utils import (
     check_breach,
-    update_XTrig,
+    update_C,
     update_tFP,
     update_XFP,
     update_YFP
 )
 
 class FBSNN(ABC):
-    def __init__(self, Xi, T, M, N, D, Mm, layers, mode, activation, domain_barrier = None, basket_measurement = None):
+    def __init__(self, Xi, T, M, N, D, Mm, layers, mode, activation,
+                 domain_barrier = None, basket_measurement = None, barrier_style =  None, rebate = None):
         # Constructor for the FBSNN class
         # Initializes the neural network with specified parameters and architecture
         
@@ -65,8 +66,12 @@ class FBSNN(ABC):
             self.activation_function = nn.Tanh()
 
         # Specifying the barrier, if any
-        self.domain_barrier = domain_barrier # Nonetype if no barrier, otherwise float
+        self.domain_barrier = domain_barrier # Nonetype if no barrier, otherwise float. Indicates the RELATIVE barrier e.g. 1.7, relative to the intial fixing at X(t = 0)
         self.basket_measurement = basket_measurement # Nonetype if no barrier, otherwise one of ['WorstOf','BestOf','EqualWeighting']
+        self.barrier_style = barrier_style # Nonteyp if no barrier, otherwise one of ['up-and-out', 'up-and-in']
+        self.rebate = rebate # Nonetype if no barrier, otherwise float
+        # Sense-checks
+        if self.basket_measurement == 'Single': assert self.D == 1
 
         # Initialize the neural network based on the chosen mode
         if self.mode == "FC":
@@ -150,7 +155,7 @@ class FBSNN(ABC):
 
 
     def loss_function(self, t, W, Xi,
-                      XTrig = None, tFP = None, XFP = None # These are all arguments exclusively for Barrier options
+                      C = None, tFP = None, XFP = None # These are all arguments exclusively for Barrier options
                       ):
         # Calculates the loss for the neural network
         # Recall that the Loss function used in Parpas' paper has 2 components
@@ -165,7 +170,7 @@ class FBSNN(ABC):
         # Xi: Initial state, with dimensions 1 x D
 
         # Parameters for Barrier Options
-        # XTrig (M x D Tensor) - Indicator variable if barrier has been breached at some point in this iteration & dimension
+        # C  (M x D Tensor) - Indicator variable if barrier has been breached at some point in this iteration & dimension. Takes place of XTrig from Ganesan et al
         # tFP (M x D Tensor) - Tracker variable to keep track of point-in-time at which barrier was breached, if any, in each iteration & dimension
         # XFP (M x D Tensor) - Tracker variable to keep track of value of X in each dimension at each iteration at which the barrier was breached, if it was indeed breached
 
@@ -215,34 +220,47 @@ class FBSNN(ABC):
             # We get the NN's DIRECT prediction of Y(t+1), Z(t+1) based on inputs (t+1, X(t+1))
             Y1, Z1 = self.net_u(t1, X1)
 
-            # IF barrier is relevant, determine if the barrier has been hit
+            # Compute the Euler-descretised predicted value (Y1_tilde) at the next state - Y~(t+1)
+            # We use the Neural-Nework predicted values for Y(t) & Z(t)
+            # For barrier options, Y1_tilde follows different process in iterations where the barrer has been breached
+            # Therefore, we update this timestep's Y1_tilde in the below if statement to check for barrier breaches
+            Y1_tilde = Y0 + self.phi_tf(t0, X0, Y0, Z0) * (t1 - t0) + torch.sum(
+                Z0 * torch.squeeze(torch.matmul(self.sigma_tf(t0, X0, Y0), (W1 - W0).unsqueeze(-1))), dim=1,
+                keepdim=True)
+
+            # IF barrier is relevant, determine if the barrier has been hit ; update Y1_tilde for iterations where barrier has been hit
             if self.domain_barrier:
-                breach_this_timestep = check_breach(self.domain_barrier, X0, X1) # M x D
-                XTrig = update_XTrig(XTrig, breach_this_timestep)
-                
+                # Get the performance of the X-dimensions across all iterations
+                # Xi is of dimension 1 x D (starting point shared across all iterations), so need to 'repeat' it to be M x D and therefore do tensor algebra with X1, an M x D tensor
+                perf = X1 / Xi.repeat(self.M, 1)
+
+                C = update_C(performance=perf,
+                             barrier = self.domain_barrier, 
+                             measurement=self.basket_measurement,
+                             style = self.barrier_style
+                             )
+
                 # Make sure these arguments are correct!
-                # Should I be use the pre-updated or post-update XTrig?
+                # Should I be use the pre-updated or post-update C/XTrig?
                 # Should I be using t0 or t1
-                tFP = update_tFP(tFP, XTrig, t0)
+                tFP = update_tFP(tFP, C, t0)
 
                 # Again, make sure these arguments are correct!
-                # pre-updated or post-update XTrig? X1 or X0
-                XFP = update_XFP(XFP, XTrig, X1)
+                # pre-updated or post-update C/XTrig? X1 or X0
+                XFP = update_XFP(XFP, C, X1, self.D)
 
                 # Again, make sure these arguments are correct! Y0 or Y1?
                 # There's only one YFP for each iteration/path - M x 1 Tensor
                 # Additionally, I need to make sure I incorporate logic from self.basket_measurement here
                 # Just because a few of the X-dimensions breach the barrier, doesn't necessarily mean the overall Barrier Breach for Y necessarily - depends on self.basket_measurement
-                YFP = update_YFP(YFP, XTrig, Y1)
+                YFP = update_YFP(YFP, C, Y1)
 
-            
-            # Compute the Euler-descretised predicted value (Y1_tilde) at the next state - Y~(t+1)
-            # We use the Neural-Nework predicted values for Y(t) & Z(t)
-            # For barrier options, Y1_tilde follows different process in iterations where the barrer has been breache
-            # Therefore, Y1_tilde depends on YFP, and which iterations have officially breached their barrier for the overall option (not just a few X-dimensions)
-            Y1_tilde = Y0 + self.phi_tf(t0, X0, Y0, Z0) * (t1 - t0) + torch.sum(
-                Z0 * torch.squeeze(torch.matmul(self.sigma_tf(t0, X0, Y0), (W1 - W0).unsqueeze(-1))), dim=1,
-                keepdim=True)
+                # Replace the Y1_tilde created earlier (before barrier if-statement) with one which
+                # takes into account if the option's barrier has been breached
+                Y1_tilde = torch.where(C == 0,
+                                       Y1_tilde, # meaning: if no barrier breach in this iteration, maintain same value as previously calculated
+                                       self.rebate # meaining: if there IS a barrier breach in this iteration, follow the rebate value
+                                       )
 
             # Add the squared difference between Y1 and Y1_tilde to the loss
             # This is loss derived from the difference in the NN's predicted Y(t+1) & the Euler-discretised estimate of Y(t+1)
@@ -252,7 +270,7 @@ class FBSNN(ABC):
             # NOTE: can also include some measure of loss derived from 'in-out' Parity OR using Yu et al's more mathematical approach?
             # To be determined if this loss should occur at each time-step or not, only at the very end. It makes sense to make this for each timestep
             # For now, I'm not going to implement this - need to make sure I can get Ganesan et al's methodology to work, and can then extend
-            loss += NotImplementedError()
+            loss += 0
 
             # Update the variables for the next iteration - we reset our values
             # so we can pass onto next timestep fresh
@@ -262,11 +280,7 @@ class FBSNN(ABC):
             X_list.append(X0)
             Y_list.append(Y0)
 
-        # After having computed all the losses arising from the 1st term, we not compute the loss
-        # arising from the difference in NN-predicted value of Y(T) & the Euler-derived value of X(T) wrapped
-        # around the terminal condition function g(.). As you know, terminal condition indicates Y(T) = g(X(T))
-        # The below should be dependent on if a barrier has been hit
-        loss += torch.sum(torch.pow(Y1 - self.g_tf(X1), 2))
+         
         
         #  We also include the loss from NN's predicted value of Z(T) (the gradient between Y & X at time T)
         #  being different from the gradient of the function g(.) on the Euler-derived value of X(T)
@@ -322,20 +336,20 @@ class FBSNN(ABC):
         if self.domain_barrier:
             Xi = self.Xi # 1 x D - This is the initial point. The same idmension in each iteration starts at the same point
 
-            XTrig = np.zeroes((M, D)) # For each iteration and each dimension, there is an XTrig value which initialises at 0
-            tFP = np.zeroes((M, D)) # for each iteration and each dimension, there is a tFP value which initialises at same value as the 1st timestep of that iteration and dimension (which is 0 as welll)
+            C = torch.zeros((M, 1)) # For each iteration and each dimension, there is an XTrig value which initialises at 0
+            tFP = torch.zeroes((M, 1)) # for each iteration and each dimension, there is a tFP value which initialises at same value as the 1st timestep of that iteration and dimension (which is 0 as welll)
 
             # For each iteration and each dimenison, there is an XFP value which initialises at the same level as the Xi for that dimension
             # We use repeat here, because we want to repeat the initial point across all iterations (even though it's the same anyway)
             # This is because subsequently, each iteration (and each of its dimensions) will deviate, and so we need to keep track of XFP across all the iterations & dimensions as well
-            XFP = Xi.repeat(M, 1, 1) # M x 1 x D - NOTE: we could change this to M x D, look into this
+            XFP = Xi.repeat(M, 1) # M x D, since X1 starts off being M x 1
 
             # NOTE: YFP is NOT defined here - as we only get access to Y0 at the start of the FBSNN.loss_function
 
-            return t, W, XTrig, tFP, XFP
+            return t, W, C, tFP, XFP
 
         # Return the time values and Brownian paths.
-        # If barrier is not active, we'll return None in place of XTrig, tFP, XFP
+        # If barrier is not active, we'll return None in place of C, tFP, XFP
         return t, W, None, None, None
 
     def train(self, N_Iter, learning_rate):
@@ -371,13 +385,13 @@ class FBSNN(ABC):
             self.optimizer.zero_grad()
 
             # Retrieve the 'mini-batches' of time steps & Brownian motion paths - re-retrieved each time the model goes through the training epoch
-            # XTrig, tFP, XFP are only applicable for barrier options
+            # C, tFP, XFP are only applicable for barrier options
             # We then compute the loss for the current batch
             if self.domain_barrier:
-                t_batch, W_batch, XTrig_batch, tFP_batch, XFP_batch = self.fetch_minibatch() # M x (N+1) x 1, M x (N+1) x D, M x D, M x D, M x 1 x D
+                t_batch, W_batch, C_batch, tFP_batch, XFP_batch = self.fetch_minibatch() # M x (N+1) x 1, M x (N+1) x D, M x D, M x D, M x 1 x D
 
                 loss, X_pred, Y_pred, Y0_pred = self.loss_function(t_batch, W_batch, self.Xi,
-                                                                   XTrig_batch, tFP_batch, XFP_batch)
+                                                                   C_batch, tFP_batch, XFP_batch)
             
             else:
                 t_batch, W_batch, _ = self.fetch_minibatch()                

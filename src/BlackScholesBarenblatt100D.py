@@ -123,7 +123,7 @@ if __name__ == "__main__":
 
     "Available architectures"
     mode = "FC"  # FC, Resnet and NAIS-Net are available
-    activation = "sine"  # sine and ReLU are available
+    activation = "Sine"  # sine and ReLU are available
     model = BlackScholesBarenblatt(Xi, T,
                                    M, N, D,
                                    layers, mode, activation)

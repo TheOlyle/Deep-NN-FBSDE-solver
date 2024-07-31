@@ -1,115 +1,90 @@
 import torch
 
-def check_breach(anchor: float, tA: torch.Tensor, tB: torch.Tensor) -> torch.Tensor:
+def update_C(performance: torch.Tensor, barrier: float, measurement: str, style: str) -> torch.Tensor:
     """ 
-    given 2 tensors, checks element-wise to see if they breached a given 
-    anchor
-    e.g. tA has element 80, tB has corresponding element 120, and anchor = 120 => Breach!
-
-    Used in FBSNN.loss_function to determine if there has been a breach
-    tA is X0, tB is X1, and the anchor is FBSNN.domain_barrier
+    Updates C, an M x 1 tensor, based on the performance of each iteration's
+    X-processes and the barrier value, as well as the measurement style
     """
-    # Make sure the two twnsore are of equal shape
-    assert tA.shape == tB.shape
+    if measurement == 'WorstOf':
+        P = performance.min(dim = 1, keepdim = True).values
 
-    # Create a tensor of same dimensions, filled with the 'anchor' value
-    # We'll use this to perform element-wise comparison
-    tanchor = torch.full((tA.shape), anchor)
+    if measurement == 'BestOf':
+        P = performance.max(dim = 1, keepdim = True).values
 
-    # I want to check for EITHER type of barrier:
-    # Barrier below X0 and breached from top->down by X1, or barrier above X0 and breached from bottom->up by X1
-    C1 = ((tA <= tanchor) & (tanchor <= tB))
-    C2 = ((tB <= tanchor) & (tanchor <= tA))
+    if measurement == 'EqualWeighted':
+        P = torch.sum(performance, dim = 1, keepdim = True)
 
-    # An element in either of the above can be true in order
-    # for a 'Barrier Breach' to have occurred - domain breach
-    C = torch.logical_or(C1, C2)
+    if measurement == 'Single':
+        # NOTE: i'm assuming that for the style = 'Single' case, I can just go ahead and use 'performance' as if it were an integer
+        # This may not work in the implementation, python may throw some errors - to check
+        P = performance
 
-    return C
+    if style == 'up-and-out':
+        breach = P >= barrier
 
-def update_XTrig(XTrig: torch.Tensor, breach_check: torch.Tensor, basket_measurement: str) -> torch.Tensor:
-    """ 
-    Based on this timestep's breach-check tensor (from check_breach)
-    Updates XTrig accordingly
-    Recall
-        IF an element in XTrig is already 1, then it stays as 1
-        IF an element in XTrig is 0, but a breach has occurred, update to 1
-        IF an element in XTrig is 0, and a breach has not occurred, stay as 0
-    
-    NOTE: The logic of this NEEDS to change to account for different basket measurement styles.    
+    if style == 'up-and-in':
+        breach = P <= barrier # NOTE: THIS SHOULD NOT BE USED - UP-AND-IN Options still confuse me
+
+    return breach.int() # M x 1 tensor of 0s and 1s
+
+def update_tFP(tFP: torch.Tensor, C: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
     """
-    # For each element, check if either XTrig is already 1 OR if a breach has occurred
-    updated_XTrig = torch.logical_or(XTrig, breach_check)
-
-    # Convert to a 0 or 1 tensor
-    updated_XTrig = updated_XTrig.int()
-
-    return updated_XTrig
-
-def update_tFP(tFP: torch.Tensor, XTrig: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
-    """ 
-    Based on this timestep's updated XTrig, update tFP
-    Recall that the logic for an element in tFP is:
-        tFP(i) = t(i) * (1-XTrig(i-1)) + tFP(i-1) * XTrig(i-1)
+    Based on this timestep's updated C, update tFP
+    Recall that the logic for an element in tFP is :
+        tFP(i) = t(i) * (1 - XTrig(i-1)) + tFP(i-1) * XTrig(i-1)
     
-    Meaning: tFP takes the value of the current timestep
-             unless the corresponding element in XTrig = 1, 
+    where C takes place of XTrig
+
+    meaning: tFP takes the value of the current timestep
+             unless the corresponding element in C = 1,
              in which case it takes on the previous value of tFP.
              This will 'record' the timestep at which the breach was detected.
 
     Args:
-        tFP: the current tFP tensor to update. M x D. This is tFP(i-1)
-        XTrig: the updated XTrig tensor for the current timestep. M x D
-        current_t: the current timestep's tensor.
-                   derived from t[:, n+1, :], so an M x (N+1) x 1 => M x 1 tensor (value of current timestep is shared across all dimensions, the '1' element)
+        tFP: the current tFP tensor to update. Mx 1. This is tFPP(i-1)
+        C : the updated C tensor for the current timestep. M x 1. Takse places of XTrig
+        timestep: the current timestep's tensor.
+                  derived from t[:, n+1, :], so an M x (N+1) x 1 => M x 1 tensor (value of current timestep is shared across all dimensions, the '1' element)    
     """
-    # timestep is based on t0, which is of shape M x 1
-    # to perform element-wise operations, I need to convert it to same shape as
-    # XTrig, which is M x D
-    timestep = timestep.expand((XTrig.shape))
-
-    # Perform operations
-    output = timestep * (1.0 - XTrig) + tFP * XTrig
-
+    # perform operations; all tensor of same dimension
+    output = timestep * (1.0 - C) + tFP * C
+    
     return output
 
-def update_XFP(XFP: torch.Tensor, XTrig: torch.tensor, X: torch.Tensor) -> torch.Tensor:
+def updated_XFP(XFP: torch.Tensor, C: torch.Tensor, X: torch.Tensor, D: int) -> torch.Tensor:
     """
-    Updated XFP - need to write more expanis docstring
+    Based on this timestep's C, updated XFP
+    Since XFP indicates the value of each X-process of each iteration at time t = tFP,
+    XFP is an M x D tensor
+
+    Args:
+        XFP (M x D)
+        C : the updated C tensor for the current timestep. M x 1. Indicates if barrier has been hit
+            in this iteration/path
+        X (M x D) : tensor showing the values of X-process for each iteration and each dimension 
+                    at the current timestep
+        D (int)   : indicates the number of dimensions being used. This is important when
+                    enlarging C to allow for tensor algebra in the opeation with XFP and X
     """
+    # Repeat C to be of the same dimensions as tensor X & XFP
+    repeated_C = C.repeat(1, D)
+
     # Perform operation
-    output = X * (1.0 - XTrig) + XFP * XTrig
+    output = X * (1.0 - C) + XFP * C
 
     return output
 
-def update_YFP(YFP: torch.Tensor, XTrig: torch.Tensor, Y: torch.Tensor, basket_measurement: str) -> torch.Tensor:
+def update_YFP(YFP: torch.Tensor, C: torch.Tensor, Y: torch.Tensor) -> torch.Tensor:
     """
     Update to YFP, a tracker variable to see if this path's option has breached the barrier
-    Recall for a single-dimension case:
-        YFP = Y * (1 - XTrig) + YFP * XTrig
-    Meaning: if this option's single X-dimension has breached the barrier, YFP is updated because XTrig is updated.
-    For basket-options with barriers, it's more complex:
-        If Worst-Of:
-            The X-dimension with the worst relative performance to its initial value (X at t = 0) is relevant 
-            to determine if there has been a barrier breach.
-        If Best-Of:
-            The X-dimension with the best relative performance to its initial value (X at t = 0) is relevant
-            to determine if there has been a barrier breach.
-        If Equal-Weighted:
-            The performance of all of the X-dimensions relative to initial value (X at t = 0) is measured and 
-            averaged. This will determine if there has been a barrier breach.
 
-    NOTE: I NEED TO RETHINK THIS LOGIC to incorporate FBSNN.basket_measurement
-    
     Args:
-        YFP (torch.Tensor) : YFP tensor, which is M x 1
+        YFP (M x 1 Tensor) : tracker variable for value of YFP at the barrier breach, if it has occurred
+        C (M x 1 Tensor) : our indicator variable for if a barrier breach has occurred in this iteration
+        Y (M x 1 Tensor) : the NN's prediction of the Y-value this timestep
     """
-    # Y1 from self.net_u() is an M x 1 tensor
-    # to perform element-wise operations, I need to convert it to the same shape as
-    # XTrig, which is M X D
-    Y = Y.expand((XTrig.shape))
-
     # Perform operation
-    output = Y * (1.0 - XTrig) + YFP * XTrig
+    output = Y * (1.0 - C) + YFP * C
 
-    return output
+    return output 
+
