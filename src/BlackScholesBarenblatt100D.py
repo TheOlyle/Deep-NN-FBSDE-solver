@@ -1,9 +1,14 @@
+# Config to allow debugger to work
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))) # This allows to run dwebugger with absolute imports
+
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import time
 
-from FBSNNs import FBSNN
+from src.FBSNNs import FBSNN
 
 
 class BlackScholesBarenblatt(FBSNN):

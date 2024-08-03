@@ -284,6 +284,7 @@ class FBSNN(ABC):
 
         # Training loop
         for it in range(previous_it, previous_it + N_Iter): # Smart way of controlling how many training epochs to run each time from most recently trained model onward
+            # Here, Parpas uses self.Mm in his new repo - Batuhanguler did NOT have this
             if it >= 4000 and it < 20000:
                 self.N = int(np.ceil(self.Mm ** (int(it / 4000) + 1)))
             elif it < 4000:

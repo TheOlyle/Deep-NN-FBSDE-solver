@@ -1,6 +1,6 @@
 import torch
 
-def update_C(performance: torch.Tensor, barrier: float, measurement: str, style: str) -> torch.Tensor:
+def update_C(C: torch.Tensor, performance: torch.Tensor, barrier: float, measurement: str, style: str) -> torch.Tensor:
     """ 
     Updates C, an M x 1 tensor, based on the performance of each iteration's
     X-processes and the barrier value, as well as the measurement style
@@ -25,7 +25,10 @@ def update_C(performance: torch.Tensor, barrier: float, measurement: str, style:
     if style == 'up-and-in':
         breach = P <= barrier # NOTE: THIS SHOULD NOT BE USED - UP-AND-IN Options still confuse me
 
-    return breach.int() # M x 1 tensor of 0s and 1s
+    # update C based on what has been breached
+    updated_C = torch.logical_or(C, breach)
+
+    return updated_C.int() # M x 1 tensor of 0s and 1s
 
 def update_tFP(tFP: torch.Tensor, C: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
     """
@@ -47,7 +50,8 @@ def update_tFP(tFP: torch.Tensor, C: torch.Tensor, timestep: torch.Tensor) -> to
                   derived from t[:, n+1, :], so an M x (N+1) x 1 => M x 1 tensor (value of current timestep is shared across all dimensions, the '1' element)    
     """
     # perform operations; all tensor of same dimension
-    output = timestep * (1.0 - C) + tFP * C
+    output = (timestep * (1.0 - C) # For elements where NO barrier breach, record current timestamp
+               + tFP * C) # For elements WITH barrier breach, record same value as previous tFP (i.e. the timestep for whenever the barrier was breached)
     
     return output
 

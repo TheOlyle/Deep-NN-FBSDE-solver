@@ -1,12 +1,15 @@
+import sys
 import numpy as np
 from abc import ABC, abstractmethod
 import time
+import logging
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
 
-from Models import *
+from src.Models import *
 
 from src.utils import (
     check_breach,
@@ -16,8 +19,18 @@ from src.utils import (
     update_YFP
 )
 
-class FBSNN(ABC):
-    def __init__(self, Xi, T, M, N, D, Mm, layers, mode, activation,
+# TensorBoard config: change for different experiments
+tb_writer = SummaryWriter(log_dir = 'runs/Barrier_Call1D/dev1')
+
+# Logging configuration
+logging.basicConfig(format = '%(asctime)s - %(name)s - %(message)s',
+                    level = logging.DEBUG,
+                    handlers = [logging.StreamHandler(sys.stdout)]
+                    )
+_logger = logging.getLogger(__name__)
+
+class FBSNN_barrier(ABC):
+    def __init__(self, Xi, T, M, N, D, Mm, strike, layers, mode, activation,
                  domain_barrier = None, basket_measurement = None, barrier_style =  None, rebate = None):
         # Constructor for the FBSNN class
         # Initializes the neural network with specified parameters and architecture
@@ -28,7 +41,7 @@ class FBSNN(ABC):
         # M: Number of trajectories (batch size)
         # N: Number of time snapshots
         # D: Number of dimensions for the problem
-        # Mm: Number of discretization points for the SDE
+        # Mm: Number of discretization points for the SDE # THIS IS USED IN PARPAS NEW WORK, NOT IN ORIGINAL! It's his way of actioning multi-level Monte Carlo I think
         # layers: List indicating the size of each layer in the neural network
         # mode: Specifies the architecture of the neural network (e.g., 'FC' for fully connected)
         # activation: Activation function to be used in the neural network
@@ -46,7 +59,7 @@ class FBSNN(ABC):
 
         # Initialize the initial condition, convert it to a PyTorch tensor, and send to the device 
         self.Xi = torch.from_numpy(Xi).float().to(self.device)  # initial point -> this creates a Tensor
-        self.Xi.requires_grad = True
+        self.Xi.requires_grad = True # Check why this needs requires_grad = True
 
         # Store other parameters as attributes of the class.
         self.T = T  # terminal time
@@ -54,7 +67,7 @@ class FBSNN(ABC):
         self.N = N  # number of time snapshots
         self.D = D  # number of dimensions
         self.Mm = Mm  # number of discretization points for the SDE
-        self.strike = 1.0 * self.D  # strike price - this is NOT in the original Repo. Unclear why he put this in (to simplify in case of vanilla payoff formula?)
+        self.strike = strike * self.D  # strike price - this is NOT in the original Repo. Unclear why he put this in (to simplify in case of vanilla payoff formula?)
 
         self.mode = mode  # architecture of the neural network
         self.activation = activation  # activation function        # Initialize the activation function based on the provided parameter
@@ -99,6 +112,7 @@ class FBSNN(ABC):
         self.training_loss = []
         self.iteration = []
 
+        _logger.DEBUG("finished initialising FBSNN_barrier")
 
     def weights_init(self, m):
         """
@@ -134,7 +148,7 @@ class FBSNN(ABC):
 
         return u, Du
 
-    def Dg_tf(self, X):  # M x D
+    def Dg_tf(self, tFP, XFP):  # M x D
         # Calculates the gradient of the function g with respect to the input X
         # THis is used when creating the loss function. This computes the gradient of the Payoff function with respect to X
         # This SHOULD be equivalent to our estimate for Z(T), the gradient between Y & X at time T,
@@ -144,12 +158,18 @@ class FBSNN(ABC):
         # Parameters:
         # X: A batch of state variables, with dimensions M x D
 
-        g = self.g_tf(X)  # M x 1
+        # Because g_tf() is now dependent on tFP & XFP in a piece-wise manner,
+        # NOTE: Big Problem - Dg_tf is giving a LOT of zero-values
+        g = self.g_tf(tFP = tFP, XFP = XFP)  # M x 1
 
         # Now, compute the gradient of g with respect to X 
         # The gradient is calculated for each input in the batch, resulting in a tensor of dimensions M x D
-        Dg = torch.autograd.grad(outputs=[g], inputs=[X], grad_outputs=torch.ones_like(g), 
-                                allow_unused=True, retain_graph=True, create_graph=True)[0] 
+        Dg = torch.autograd.grad(outputs=[g],
+                                 inputs=[XFP],
+                                 grad_outputs=torch.ones_like(g), 
+                                 allow_unused=True,
+                                 retain_graph=True,
+                                 create_graph=True)[0] 
 
         return Dg
 
@@ -177,6 +197,7 @@ class FBSNN(ABC):
         # Returns:
         #   (loss, ....)
         # Check out FBSNN.predict regarding this
+        _logger.debug("Called loss_function")
 
         loss = 0  # Initialize the loss to zero.
         X_list = []  # List to store the states at each time step.
@@ -225,8 +246,7 @@ class FBSNN(ABC):
             # For barrier options, Y1_tilde follows different process in iterations where the barrer has been breached
             # Therefore, we update this timestep's Y1_tilde in the below if statement to check for barrier breaches
             Y1_tilde = Y0 + self.phi_tf(t0, X0, Y0, Z0) * (t1 - t0) + torch.sum(
-                Z0 * torch.squeeze(torch.matmul(self.sigma_tf(t0, X0, Y0), (W1 - W0).unsqueeze(-1))), dim=1,
-                keepdim=True)
+                Z0 * torch.squeeze(torch.matmul(self.sigma_tf(t0, X0, Y0), (W1 - W0).unsqueeze(-1))), dim=1, keepdim=True) # We're summating, since this is what you do with high-dimensional PDE. Check the FInal Project brief
 
             # IF barrier is relevant, determine if the barrier has been hit ; update Y1_tilde for iterations where barrier has been hit
             if self.domain_barrier:
@@ -234,16 +254,10 @@ class FBSNN(ABC):
                 # Xi is of dimension 1 x D (starting point shared across all iterations), so need to 'repeat' it to be M x D and therefore do tensor algebra with X1, an M x D tensor
                 perf = X1 / Xi.repeat(self.M, 1)
 
-                C = update_C(performance=perf,
-                             barrier = self.domain_barrier, 
-                             measurement=self.basket_measurement,
-                             style = self.barrier_style
-                             )
-
                 # Make sure these arguments are correct!
                 # Should I be use the pre-updated or post-update C/XTrig?
-                # Should I be using t0 or t1
-                tFP = update_tFP(tFP, C, t0)
+                # Should I be using t0 or t1 A: since i'm defining performance 'perf' based on X1, I should use t1
+                tFP = update_tFP(tFP, C, t1)
 
                 # Again, make sure these arguments are correct!
                 # pre-updated or post-update C/XTrig? X1 or X0
@@ -253,10 +267,20 @@ class FBSNN(ABC):
                 # There's only one YFP for each iteration/path - M x 1 Tensor
                 # Additionally, I need to make sure I incorporate logic from self.basket_measurement here
                 # Just because a few of the X-dimensions breach the barrier, doesn't necessarily mean the overall Barrier Breach for Y necessarily - depends on self.basket_measurement
+                # YFP is unused currently - Ganesan et al uses it in the loss function, why don't we?
                 YFP = update_YFP(YFP, C, Y1)
+
+                # Have moved C here - this makes the behaviour of tracker variables tFP, XFP & YFP behave accordingly - they record the values at the appropriate timestep for barrier breaches
+                C = update_C(C = C,
+                             performance=perf,
+                             barrier = self.domain_barrier, 
+                             measurement=self.basket_measurement,
+                             style = self.barrier_style
+                             )
 
                 # Replace the Y1_tilde created earlier (before barrier if-statement) with one which
                 # takes into account if the option's barrier has been breached
+                # NOTE: the below implementation is ONLY for 'up-and-out' barrier options
                 Y1_tilde = torch.where(C == 0,
                                        Y1_tilde, # meaning: if no barrier breach in this iteration, maintain same value as previously calculated
                                        self.rebate # meaining: if there IS a barrier breach in this iteration, follow the rebate value
@@ -265,12 +289,17 @@ class FBSNN(ABC):
             # Add the squared difference between Y1 and Y1_tilde to the loss
             # This is loss derived from the difference in the NN's predicted Y(t+1) & the Euler-discretised estimate of Y(t+1)
             # The below should be dependent on if the barrier has been hit
+            # Since we adjust the process followed by Y1_tilde on paths where the barrier has been hit, the below is de-factor dependent
+            # on a barrier breach
             loss += torch.sum(torch.pow(Y1 - Y1_tilde, 2))
 
             # NOTE: can also include some measure of loss derived from 'in-out' Parity OR using Yu et al's more mathematical approach?
             # To be determined if this loss should occur at each time-step or not, only at the very end. It makes sense to make this for each timestep
             # For now, I'm not going to implement this - need to make sure I can get Ganesan et al's methodology to work, and can then extend
             loss += 0
+
+            # Sometimes, the NN's prediction of Y1 can be negative. Therefore, we couuld try to speed up convergence by introducing
+            # strong penalties in the loss function for negative values of Y1?
 
             # Update the variables for the next iteration - we reset our values
             # so we can pass onto next timestep fresh
@@ -280,12 +309,19 @@ class FBSNN(ABC):
             X_list.append(X0)
             Y_list.append(Y0)
 
-         
+        _logger.debug("Finished iterating over all timesteps - computing final loss component of terminal condition")         
         
+        # After having computed all the losses arising from the 1st term, we now compute the loss
+        # arising from the difference in NN-predicted value of Y(T) & the Euler-derived value of X(T)
+        # wrapped around the terminal condiiton function g(.). 
+        # NOTE: the below should be dependent on if a barrier has been hit - Ganesan et al use (YFP - g_tf(tFP, XFP))^2, but not sure how to implement this here ...
+        loss += torch.sum(torch.pow(Y1 - self.g_tf(tFP = tFP, XFP = XFP)))
+
         #  We also include the loss from NN's predicted value of Z(T) (the gradient between Y & X at time T)
         #  being different from the gradient of the function g(.) on the Euler-derived value of X(T)
         #  Add the difference between the network's gradient and the gradient of g at the final state
-        loss += torch.sum(torch.pow(Z1 - self.Dg_tf(X1), 2))
+        #  NOTE: the below should be dependent on if a barrier has been hit - Ganesan et al u
+        loss += torch.sum(torch.pow(Z1 - self.Dg_tf(tFP = tFP, XFP = XFP), 2))
 
         # Create a list of Euler-derived X values & list of NN-derived Y-values
         X = torch.stack(X_list, dim=1)
@@ -329,8 +365,8 @@ class FBSNN(ABC):
         W = np.cumsum(DW, axis=1)  # Cumulative Brownian motion for each trajectory, time snapshot, and dimension. 
 
         # Convert the numpy arrays to PyTorch tensors and transfer them to the configured device (CPU or GPU)
-        t = torch.from_numpy(t).float().to(self.device) # M x (N+1) x 1
-        W = torch.from_numpy(W).float().to(self.device) # M x (N+1) x D
+        t = torch.from_numpy(t).float().to(self.device) # M x (N+1) x 1 # Remember: self.N (num of time snapshots) is affected by Multi-Levelling of Monte Carlo (self.N is adjusted each training loop)
+        W = torch.from_numpy(W).float().to(self.device) # M x (N+1) x D # Remember: self.N (num of time snapshots) is affected by Multi-Levelling of Monte Carlo (self.N is adjusted each training loop)
 
         # Logic for if there is a Barrier:
         if self.domain_barrier:
@@ -357,7 +393,7 @@ class FBSNN(ABC):
         # Parameters:
         # N_Iter: Number of iterations for the training process
         # learning_rate: Learning rate for the optimizer
-
+        _logger.debug("Started training")
         # Initialize an array to store temporary loss values for averaging
         loss_temp = np.array([])
 
@@ -375,7 +411,9 @@ class FBSNN(ABC):
 
         # Training loop
         for it in range(previous_it, previous_it + N_Iter): # Smart way of controlling how many training epochs to run each time from most recently trained model onward
-            if it >= 4000 and it < 20000:
+            _logger.debug("started training loop %s", it)
+            if it >= 4000 and it < 20000: # This is his way of using Multi-Level Monte Carlo I guess?
+                # Updates self.N (num of time snapshots) to rounded-up value of self.Mm scaled by the value of whichever iteration we are of the first 4000th
                 self.N = int(np.ceil(self.Mm ** (int(it / 4000) + 1)))
             elif it < 4000:
                 self.N = int(np.ceil(self.Mm))
@@ -402,6 +440,12 @@ class FBSNN(ABC):
             self.optimizer.zero_grad()  # Zero the gradients again to ensure correct gradient accumulation
             loss.backward()  # Compute the gradients of the loss w.r.t. the network parameters
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+            # TensorBoard: log the gradients
+            if it % 100 == 0:
+                for name, param in self.model.named_parameters():
+                    if param.grad is not None:
+                        tb_writer.add_histogram(f'{name}_grad', param.grad, it)
             
             self.optimizer.step()  # Update the network parameters based on the gradients
 
@@ -421,7 +465,21 @@ class FBSNN(ABC):
                 self.training_loss.append(loss_temp.mean())  # Append the average loss
                 loss_temp = np.array([])  # Reset the temporary loss array
                 self.iteration.append(it)  # Append the current iteration number
-        
+
+            # Log to TensorBoard:
+            if it % 100 == 0:
+                # Log running loss
+                tb_writer.add_scalar(tag = 'training loss',
+                                     scalar_value = self.training_loss, 
+                                     global_step = it
+                                     )
+                # Log Y0_pred
+                tb_writer.add_scalar(tag = 'Y0_pred',
+                                     scalar_value = Y0_pred,
+                                     global_step = it
+                                     )
+        _logger.debug("finished training")
+
         # Stack the iteration and training loss for plotting
         graph = np.stack((self.iteration, self.training_loss))
 
