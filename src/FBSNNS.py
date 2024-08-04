@@ -5,9 +5,12 @@ import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
 
 from Models import *
 
+# Tensorboard config
+tb_writer = SummaryWriter(log_dir = 'runs/BlackScholesBarenblatt/1D_50M_30N_FC/')
 
 class FBSNN(ABC):
     def __init__(self, Xi, T, M, N, D, Mm, layers, mode, activation):
@@ -138,7 +141,9 @@ class FBSNN(ABC):
         return Dg
 
 
-    def loss_function(self, t, W, Xi):
+    def loss_function(self, t, W, Xi,
+                      it = None # Adding this argument to pass to TensorBoard logs
+                      ):
         # Calculates the loss for the neural network
         # Recall that the Loss function used in Parpas' paper has 2 components
         #   1) Loss coming from NN-derived Y(t) not being internally consistent
@@ -212,6 +217,23 @@ class FBSNN(ABC):
         #  being different from the gradient of the function g(.) on the Euler-derived value of X(T)
         #  Add the difference between the network's gradient and the gradient of g at the final state
         loss += torch.sum(torch.pow(Z1 - self.Dg_tf(X1), 2))
+
+        # Oscar code: Logging to TensorBoard
+        if it:
+            if it % 100 == 0:
+                tb_writer.add_histogram(tag = 'Dg_tf at T',
+                                        values = self.Dg_tf(X1),
+                                        global_step = it
+                                        )
+                tb_writer.add_histogram(tag = 'g_tf at T',
+                                        values = self.g_tf(X1),
+                                        global_step = it
+                                        )
+                tb_writer.add_histogram(tag = 'Y_pred at T',
+                                        values = Y1,
+                                        global_step = it
+                                        )
+                tb_writer.close()
 
         # Create a list of Euler-derived X values & list of NN-derived Y-values
         X = torch.stack(X_list, dim=1)
@@ -298,7 +320,7 @@ class FBSNN(ABC):
             t_batch, W_batch = self.fetch_minibatch()  # M x (N+1) x 1, M x (N+1) x D
 
             # Compute the loss for the CURRENT batch
-            loss, X_pred, Y_pred, Y0_pred = self.loss_function(t_batch, W_batch, self.Xi)
+            loss, X_pred, Y_pred, Y0_pred = self.loss_function(t_batch, W_batch, self.Xi, it)
             
             # Perform backpropagation - computes gradients of Loss tensore wrt to parameters using back-prop
             self.optimizer.zero_grad()  # Zero the gradients again to ensure correct gradient accumulation
@@ -321,9 +343,25 @@ class FBSNN(ABC):
             # self.training_loss
             if it % 100 == 0:
                 self.training_loss.append(loss_temp.mean())  # Append the average loss
+                tb_writer.add_scalar(tag = "Running loss",
+                                     scalar_value = loss_temp.mean(),
+                                     global_step = it
+                                     )
                 loss_temp = np.array([])  # Reset the temporary loss array
                 self.iteration.append(it)  # Append the current iteration number
         
+            if it % 100 == 0:
+                # Log Y0 Pred
+                tb_writer.add_scalar(tag = 'Y0_pred',
+                                     scalar_value = Y0_pred,
+                                     global_step = it
+                                     )
+                tb_writer.add_histogram(tag = 'All_Y_pred',
+                                        values = Y_pred,
+                                        global_step = it
+                                        )
+
+
         # Stack the iteration and training loss for plotting
         graph = np.stack((self.iteration, self.training_loss))
 

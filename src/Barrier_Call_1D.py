@@ -30,8 +30,10 @@ _logger = logging.getLogger(__name__)
 
 class BlackScholes1DBarrier(FBSNN_barrier):
     
-    def __init__(self, Xi, T, M, N, D, Mm, strike, layers, mode, activation, domain_barrier, basket_measurement, barrier_style, rebate):
-        super().init(Xi, T, M, N, D, Mm, strike, layers, mode, activation, domain_barrier, basket_measurement, barrier_style, rebate)
+    def __init__(self, Xi, T, M, N, D, Mm, strike, layers, mode, activation, domain_barrier, basket_measurement, barrier_style, rebate, penalise_neg_Y, dynamic_lr):
+        super().init(Xi, T, M, N, D, Mm, strike, layers, mode, activation,
+                     domain_barrier, basket_measurement, barrier_style, rebate,
+                     penalise_neg_Y, dynamic_lr)
         # We are restricting ourselves to the special case of 1-underlyig Barrier optino
         self.basket_measurement = 'Single'
         self.D = 1
@@ -111,51 +113,53 @@ class BlackScholes1DBarrier(FBSNN_barrier):
         This converts X, an M x D tensor, into an M x D x D tensor
         Essentially, returns a batch D x D diagonal matrices for the diffusion coefficients
         """
-        returns SIGMA * torch.diag_embed(X) # M x D x D
+        return SIGMA * torch.diag_embed(X) # M x D x D
 
 # before trying to dela with u_exact
 # I want to see if my FBSNN_barrier base class & the chil class BlackScholes1D barrier
 # Actually work as intended.
 
 if __name__ == "__main__":
-    M = 20
-    N = 500
+    M = 150
+    N = 80
     D = 1
     Mm = N ** (1/5)
-    strike = 0.8
+    strike = 1
 
     layers = [D + 1] + 4 * [256] + [1] # -> [101, 256, 256, 256, 1]
 
     # Xi is meant to be the intial point - I'm unsure about why it's being created in the below manner
     # Do they just want to get some initial points starting at 1, and others in 0.5? Why?
-    Xi = np.array([1.0]  D)[None, :]
+    Xi = np.array([1.0]  D)[None, :])
     T = 1.0
 
     mode = "FC"  # FC, Resnet and NAIS-Net are available
     activation = "Sine"  # sine and ReLU are available
 
     # Instantianted barrier-related attributes
-    domain_barrier = 1.2
+    domain_barrier = 100 # Setting this at 100 makes this de-facto a standard call
     basket_measurement = 'Single'
     barrier_style = 'up-and-out'
     rebate = 0
 
     model = BlackScholes1DBarrier(Xi = Xi,
-                                   T = T,
-                                   M = M,
-                                   N = N,
-                                   D = D,
-                                   Mm = Mm,
-                                   strike = strike,
-                                   layers = layers,
-                                   mode = mode,
-                                   activation = activation,
-                                   domain_barrier = domain_barrier, 
-                                   basket_measurement = basket_measurement,
-                                   barrier_style = barrier_style,
-                                   rebate = rebate
-
-                                   )
-    model.train(N_iter = 2*10**3, learning_rate = 1e-3)
+                                    T = T,
+                                    M = M,
+                                    N = N,
+                                    D = D,
+                                    Mm = Mm,
+                                    strike = strike,
+                                    layers = layers,
+                                    mode = mode,
+                                    activation = activation,
+                                    domain_barrier = domain_barrier, 
+                                    basket_measurement = basket_measurement,
+                                    barrier_style = barrier_style,
+                                    rebate = rebate,
+                                    penalise_neg_Y = False,
+                                    dynamic_lr = False
+                                    )
+    
+    model.train(N_iter = 12000, learning_rate = 0.1)
 
 

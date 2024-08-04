@@ -113,9 +113,9 @@ def run_model(model, N_Iter, learning_rate):
 
 if __name__ == "__main__":
     tot = time.time()
-    M = 100  # number of trajectories (batch size)
-    N = 50  # number of time snapshots
-    D = 100  # number of dimensions
+    M = 50  # number of trajectories (batch size). Originally, M  = 100 
+    N = 30  # number of time snapshots, Originally, M = 50
+    D = 1  # number of dimensions. Originally, D = 100
 
     # Unclear why 1st layer is 101 instead of 100
     # But 256 neurons used in each hidden layer
@@ -123,7 +123,8 @@ if __name__ == "__main__":
 
     # Xi is meant to be the intial point - I'm unsure about why it's being created in the below manner
     # Do they just want to get some initial points starting at 1, and others in 0.5? Why?
-    Xi = np.array([1.0, 0.5] * int(D / 2))[None, :]
+    # Note, I amended this to the standard for my own. Originally was Xi = np.array([1.0, 0.5] * int(D / 2))[None, :]
+    Xi = np.array([1.0] * D)[None, :]
     T = 1.0
 
     "Available architectures"
@@ -132,4 +133,5 @@ if __name__ == "__main__":
     model = BlackScholesBarenblatt(Xi, T,
                                    M, N, D,
                                    layers, mode, activation)
-    run_model(model, 2*10**4, 1e-3)
+    
+    run_model(model, 300, 1e-3)

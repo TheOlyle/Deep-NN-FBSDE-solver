@@ -92,3 +92,14 @@ def update_YFP(YFP: torch.Tensor, C: torch.Tensor, Y: torch.Tensor) -> torch.Ten
 
     return output 
 
+def NegRelu(input: torch.Tensor) -> torch.Tensor:
+    """
+    Thisi s a function whcih actions the below
+    NegRelu(x) = - min(x, 0)
+    
+    This can be used to increase the loss for negative values of predicted Y
+    This is only used if FBSNN_barrier.penalise_neg_Y = True
+    """
+    loss = - torch.min(input, torch.zeros(input.shape))
+    
+    return loss

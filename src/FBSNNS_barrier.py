@@ -16,11 +16,12 @@ from src.utils import (
     update_C,
     update_tFP,
     update_XFP,
-    update_YFP
+    update_YFP,
+    NegRelu
 )
 
 # TensorBoard config: change for different experiments
-tb_writer = SummaryWriter(log_dir = 'runs/Barrier_Call1D/dev1')
+tb_writer = SummaryWriter(log_dir = 'runs/Barrier_Call1D/K_1_Barr_100_learnrate_0p1')
 
 # Logging configuration
 logging.basicConfig(format = '%(asctime)s - %(name)s - %(message)s',
@@ -31,7 +32,9 @@ _logger = logging.getLogger(__name__)
 
 class FBSNN_barrier(ABC):
     def __init__(self, Xi, T, M, N, D, Mm, strike, layers, mode, activation,
-                 domain_barrier = None, basket_measurement = None, barrier_style =  None, rebate = None):
+                 domain_barrier = None, basket_measurement = None, barrier_style =  None, rebate = None,
+                 penalise_neg_Y = False, dynamic_lr = False # Miscellaneous parameters for how to action the NN.
+                 ):
         # Constructor for the FBSNN class
         # Initializes the neural network with specified parameters and architecture
         
@@ -86,6 +89,10 @@ class FBSNN_barrier(ABC):
         # Sense-checks
         if self.basket_measurement == 'Single': assert self.D == 1
 
+        # Loss-modifying attributes
+        self.penalise_neg_Y = penalise_neg_Y
+        self.dynamic_lr = dynamic_lr
+
         # Initialize the neural network based on the chosen mode
         if self.mode == "FC":
             # Fully Connected architecture
@@ -111,6 +118,8 @@ class FBSNN_barrier(ABC):
         # Initialize lists to record training loss and iterations.
         self.training_loss = []
         self.iteration = []
+
+        # Tensorboard: add graph here?
 
         _logger.DEBUG("finished initialising FBSNN_barrier")
 
@@ -139,7 +148,7 @@ class FBSNN_barrier(ABC):
 
         # Pass the concatenated input through the neural network model
         # The output u is a tensor of dimensions M x 1, representing the value function at each input (t, X)
-        u = self.model(input)  # M x 1
+        u = self.model(input)  # M x 1 # This invokes the 'forward' method of our self.Model
 
         # Compute the gradient of the output u with respect to the state variables X
         # The gradient is calculated for each input in the batch, resulting in a tensor of dimensions M x D
@@ -175,6 +184,7 @@ class FBSNN_barrier(ABC):
 
 
     def loss_function(self, t, W, Xi,
+                      it: int # This is global training-epoch identifier for TensorBoard logs
                       C = None, tFP = None, XFP = None # These are all arguments exclusively for Barrier options
                       ):
         # Calculates the loss for the neural network
@@ -193,6 +203,9 @@ class FBSNN_barrier(ABC):
         # C  (M x D Tensor) - Indicator variable if barrier has been breached at some point in this iteration & dimension. Takes place of XTrig from Ganesan et al
         # tFP (M x D Tensor) - Tracker variable to keep track of point-in-time at which barrier was breached, if any, in each iteration & dimension
         # XFP (M x D Tensor) - Tracker variable to keep track of value of X in each dimension at each iteration at which the barrier was breached, if it was indeed breached
+
+        # Miscellaneous parameters
+        # it (int) - identifies the epoch of training we are currently in. For TensorBoard dashboard/analytics.
 
         # Returns:
         #   (loss, ....)
@@ -300,6 +313,8 @@ class FBSNN_barrier(ABC):
 
             # Sometimes, the NN's prediction of Y1 can be negative. Therefore, we couuld try to speed up convergence by introducing
             # strong penalties in the loss function for negative values of Y1?
+            if self.penalise_neg_Y:
+                loss += NegRelu(Y1)
 
             # Update the variables for the next iteration - we reset our values
             # so we can pass onto next timestep fresh
@@ -322,6 +337,24 @@ class FBSNN_barrier(ABC):
         #  Add the difference between the network's gradient and the gradient of g at the final state
         #  NOTE: the below should be dependent on if a barrier has been hit - Ganesan et al u
         loss += torch.sum(torch.pow(Z1 - self.Dg_tf(tFP = tFP, XFP = XFP), 2))
+
+        # At THIS point, I should log g_tf() & Dg_tf() in TensorBoard. May as well also log Y1 & Z1
+        # However, to do this, I need a unique identifier for this epoch: I should pass 'it' as an argument to loss function
+        if it % 100 == 0:
+            tb_writer.add_histogram(tag = 'Dg_tf at T',
+                                    values = self.Dg_tf(tFP = tFP, XFP = XFP),
+                                    global_step = it
+                                    )
+            tb_writer.add_histogram(tag = 'g_tf at T',
+                                    values = self.g_tf(tFP = tFP, XFP = XFP),
+                                    global_step = it
+                                    )
+            tb_writer.add_histogram(tag = 'Y_pred at T',
+                                    values = Y1,
+                                    global_step = it
+                                    )
+            tb_writer.close()
+
 
         # Create a list of Euler-derived X values & list of NN-derived Y-values
         X = torch.stack(X_list, dim=1)
@@ -429,11 +462,12 @@ class FBSNN_barrier(ABC):
                 t_batch, W_batch, C_batch, tFP_batch, XFP_batch = self.fetch_minibatch() # M x (N+1) x 1, M x (N+1) x D, M x D, M x D, M x 1 x D
 
                 loss, X_pred, Y_pred, Y0_pred = self.loss_function(t_batch, W_batch, self.Xi,
+                                                                   it,
                                                                    C_batch, tFP_batch, XFP_batch)
             
             else:
                 t_batch, W_batch, _ = self.fetch_minibatch()                
-                loss, X_pred, Y_pred, Y0_pred = self.loss_function(t_batch, W_batch, self.Xi)
+                loss, X_pred, Y_pred, Y0_pred = self.loss_function(t_batch, W_batch, self.Xi, it)
 
             
             # Perform backpropagation - computes gradients of Loss tensore wrt to parameters using back-prop
@@ -445,8 +479,9 @@ class FBSNN_barrier(ABC):
             if it % 100 == 0:
                 for name, param in self.model.named_parameters():
                     if param.grad is not None:
+                        # Add a Hook here to debug issues with gradients.
                         tb_writer.add_histogram(f'{name}_grad', param.grad, it)
-            
+                tb_writer.close()
             self.optimizer.step()  # Update the network parameters based on the gradients
 
             # Store the current loss value for later averaging - loss_temp is our store of the loss
@@ -463,22 +498,31 @@ class FBSNN_barrier(ABC):
             # self.training_loss
             if it % 100 == 0:
                 self.training_loss.append(loss_temp.mean())  # Append the average loss
+                tb_writer.add_scalar(tag = 'Running loss',
+                                     scalar_value = loss_temp.mean(),
+                                     global_step = it
+                                     )
+                tb_writer.close()
                 loss_temp = np.array([])  # Reset the temporary loss array
                 self.iteration.append(it)  # Append the current iteration number
 
             # Log to TensorBoard:
             if it % 100 == 0:
-                # Log running loss
-                tb_writer.add_scalar(tag = 'training loss',
-                                     scalar_value = self.training_loss, 
-                                     global_step = it
-                                     )
                 # Log Y0_pred
                 tb_writer.add_scalar(tag = 'Y0_pred',
                                      scalar_value = Y0_pred,
                                      global_step = it
                                      )
+                tb_writer.add_histogram(tag = 'All_Y_pred',
+                                        values = Y_pred,
+                                        global_step = it
+                                        )
+                tb_writer.close()
+
+        tb_writer.flush() # good practice to flush at end of training.
+        
         _logger.debug("finished training")
+        
 
         # Stack the iteration and training loss for plotting
         graph = np.stack((self.iteration, self.training_loss))
