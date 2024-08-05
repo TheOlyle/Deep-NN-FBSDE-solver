@@ -21,7 +21,7 @@ from src.utils import (
 )
 
 # TensorBoard config: change for different experiments
-tb_writer = SummaryWriter(log_dir = 'runs/Barrier_Call1D/K_1_Barr_100_learnrate_0p1')
+tb_writer = SummaryWriter(log_dir = 'runs/Barrier_Call1D/dev2')
 
 # Logging configuration
 logging.basicConfig(format = '%(asctime)s - %(name)s - %(message)s',
@@ -31,9 +31,9 @@ logging.basicConfig(format = '%(asctime)s - %(name)s - %(message)s',
 _logger = logging.getLogger(__name__)
 
 class FBSNN_barrier(ABC):
-    def __init__(self, Xi, T, M, N, D, Mm, strike, layers, mode, activation,
+    def __init__(self, Xi, T, M, N, D, Mm, strike, layers, mode, activation, N_iter, learning_rate
                  domain_barrier = None, basket_measurement = None, barrier_style =  None, rebate = None,
-                 penalise_neg_Y = False, dynamic_lr = False # Miscellaneous parameters for how to action the NN.
+                 penalise_neg_Y = False # Miscellaneous parameters for how to action the NN.
                  ):
         # Constructor for the FBSNN class
         # Initializes the neural network with specified parameters and architecture
@@ -48,6 +48,9 @@ class FBSNN_barrier(ABC):
         # layers: List indicating the size of each layer in the neural network
         # mode: Specifies the architecture of the neural network (e.g., 'FC' for fully connected)
         # activation: Activation function to be used in the neural network
+
+        # Oscar Parameters:
+        # Learning rate: if 'dynamic' use a dynamic learning rate, otherwise static learning rate
 
         # Check if CUDA is available and set the appropriate device (GPU or CPU)
         device_idx = 0
@@ -91,7 +94,8 @@ class FBSNN_barrier(ABC):
 
         # Loss-modifying attributes
         self.penalise_neg_Y = penalise_neg_Y
-        self.dynamic_lr = dynamic_lr
+        self.N_iter = N_iter
+        self.learning_rate =  learning_rate
 
         # Initialize the neural network based on the chosen mode
         if self.mode == "FC":
@@ -114,6 +118,28 @@ class FBSNN_barrier(ABC):
 
         # Apply a custom weights initialization to the model
         self.model.apply(self.weights_init)
+
+        # TensorBoard: add hyperaparameters
+        tb_writer.add_hparams(hparam_dict = {"Xi":round(self.Xi.item(), 4),
+                                             "T": self.T,
+                                             "M": self.M,
+                                             "N": self.N,
+                                             "D": self.D,
+                                             "Mm": self.Mm,
+                                             "strike": self.strike,
+                                             "mode": self.mode,
+                                             "activation": self.activation,
+                                             "barrier": self.domain_barrier, 
+                                             "basket measurement": self.basket_measurement,
+                                             "barrier style": self.barrier_style, 
+                                             "rebate": self.rebate,
+                                             "penalise_neg_Y":self.penalise_neg_Y,
+                                             "Epochs": str(self.N_iter),
+                                             "learning rate": self.learning_rate
+                                             }
+                             metric_dict = {}
+                                             )
+
 
         # Initialize lists to record training loss and iterations.
         self.training_loss = []
@@ -314,7 +340,7 @@ class FBSNN_barrier(ABC):
             # Sometimes, the NN's prediction of Y1 can be negative. Therefore, we couuld try to speed up convergence by introducing
             # strong penalties in the loss function for negative values of Y1?
             if self.penalise_neg_Y:
-                loss += NegRelu(Y1)
+                loss += torch.sum(NegRelu(Y1))
 
             # Update the variables for the next iteration - we reset our values
             # so we can pass onto next timestep fresh
@@ -341,15 +367,15 @@ class FBSNN_barrier(ABC):
         # At THIS point, I should log g_tf() & Dg_tf() in TensorBoard. May as well also log Y1 & Z1
         # However, to do this, I need a unique identifier for this epoch: I should pass 'it' as an argument to loss function
         if it % 100 == 0:
-            tb_writer.add_histogram(tag = 'Dg_tf at T',
+            tb_writer.add_histogram(tag = 'Model_Output/Dg_tf at T',
                                     values = self.Dg_tf(tFP = tFP, XFP = XFP),
                                     global_step = it
                                     )
-            tb_writer.add_histogram(tag = 'g_tf at T',
+            tb_writer.add_histogram(tag = 'Model_Output/g_tf at T',
                                     values = self.g_tf(tFP = tFP, XFP = XFP),
                                     global_step = it
                                     )
-            tb_writer.add_histogram(tag = 'Y_pred at T',
+            tb_writer.add_histogram(tag = 'Model_Output/Y_pred at T',
                                     values = Y1,
                                     global_step = it
                                     )
@@ -480,7 +506,8 @@ class FBSNN_barrier(ABC):
                 for name, param in self.model.named_parameters():
                     if param.grad is not None:
                         # Add a Hook here to debug issues with gradients.
-                        tb_writer.add_histogram(f'{name}_grad', param.grad, it)
+                        name_split = name.split('.')
+                        tb_writer.add_histogram(f'Layer {name_split[0]}/name_split[1]_grad', param.grad, it)
                 tb_writer.close()
             self.optimizer.step()  # Update the network parameters based on the gradients
 
@@ -490,8 +517,9 @@ class FBSNN_barrier(ABC):
             # Print the training progress every 100 iterations
             if it % 100 == 0:
                 elapsed = time.time() - start_time  # Calculate the elapsed time
-                print('It: %d, Loss: %.3e, Y0: %.3f, Time: %.2f, Learning Rate: %.3e' %
-                    (it, loss, Y0_pred, elapsed, learning_rate))
+                Y1_pred = torch.mean(Y_pred[:, -1, :])
+                print('It: %d, Loss: %.3e, Y at t=0: %.3f, Mean Y at t=T: %.3f Time: %.2f, Learning Rate: %.3e' %
+                    (it, loss, Y0_pred, Y1_pred, elapsed, learning_rate))
                 start_time = time.time()  # Reset the start time for the next print interval
 
             # Record the average loss and iteration number every 100 iterations in
@@ -509,12 +537,12 @@ class FBSNN_barrier(ABC):
             # Log to TensorBoard:
             if it % 100 == 0:
                 # Log Y0_pred
-                tb_writer.add_scalar(tag = 'Y0_pred',
+                tb_writer.add_scalar(tag = 'Model_Output/Y0_pred',
                                      scalar_value = Y0_pred,
                                      global_step = it
                                      )
-                tb_writer.add_histogram(tag = 'All_Y_pred',
-                                        values = Y_pred,
+                tb_writer.add_histogram(tag = 'Model_Output/Mean predicted Y across paths at each time-step',
+                                        values = torch.mean(Y_pred, dim = 0),
                                         global_step = it
                                         )
                 tb_writer.close()

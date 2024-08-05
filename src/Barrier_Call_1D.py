@@ -30,8 +30,8 @@ _logger = logging.getLogger(__name__)
 
 class BlackScholes1DBarrier(FBSNN_barrier):
     
-    def __init__(self, Xi, T, M, N, D, Mm, strike, layers, mode, activation, domain_barrier, basket_measurement, barrier_style, rebate, penalise_neg_Y, dynamic_lr):
-        super().init(Xi, T, M, N, D, Mm, strike, layers, mode, activation,
+    def __init__(self, Xi, T, M, N, D, Mm, strike, layers, mode, activation, N_Iter, learning_rate, domain_barrier, basket_measurement, barrier_style, rebate, penalise_neg_Y, dynamic_lr):
+        super().init(Xi, T, M, N, D, Mm, strike, layers, mode, activation, N_Iter, learning_rate
                      domain_barrier, basket_measurement, barrier_style, rebate,
                      penalise_neg_Y, dynamic_lr)
         # We are restricting ourselves to the special case of 1-underlyig Barrier optino
@@ -142,6 +142,10 @@ if __name__ == "__main__":
     barrier_style = 'up-and-out'
     rebate = 0
 
+    # Training Hyperparameters
+    N_Iter = 12000
+    learning_rate = 0.01 # Either 'dynamic' or a float
+
     model = BlackScholes1DBarrier(Xi = Xi,
                                     T = T,
                                     M = M,
@@ -152,14 +156,15 @@ if __name__ == "__main__":
                                     layers = layers,
                                     mode = mode,
                                     activation = activation,
+                                    N_Iter= N_Iter,
+                                    learning_rate=learning_rate
                                     domain_barrier = domain_barrier, 
                                     basket_measurement = basket_measurement,
                                     barrier_style = barrier_style,
                                     rebate = rebate,
                                     penalise_neg_Y = False,
-                                    dynamic_lr = False
                                     )
     
-    model.train(N_iter = 12000, learning_rate = 0.1)
+    model.train(N_iter = N_Iter, learning_rate = learning_rate)
 
 
