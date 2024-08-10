@@ -10,7 +10,7 @@ from torch.utils.tensorboard import SummaryWriter
 from Models import *
 
 # Tensorboard config
-tb_writer = SummaryWriter(log_dir = 'runs/BlackScholesBarenblatt/1D_50M_30N_FC/')
+tb_writer = SummaryWriter(log_dir = 'runs/BlackScholesBarenblatt/dev3')
 
 class FBSNN(ABC):
     def __init__(self, Xi, T, M, N, D, Mm, layers, mode, activation):
@@ -221,15 +221,15 @@ class FBSNN(ABC):
         # Oscar code: Logging to TensorBoard
         if it:
             if it % 100 == 0:
-                tb_writer.add_histogram(tag = 'Dg_tf at T',
+                tb_writer.add_histogram(tag = 'Model_Output/Dg_tf at T',
                                         values = self.Dg_tf(X1),
                                         global_step = it
                                         )
-                tb_writer.add_histogram(tag = 'g_tf at T',
+                tb_writer.add_histogram(tag = 'Model_Output/g_tf at T',
                                         values = self.g_tf(X1),
                                         global_step = it
                                         )
-                tb_writer.add_histogram(tag = 'Y_pred at T',
+                tb_writer.add_histogram(tag = 'Model_Output/Y_pred at T',
                                         values = Y1,
                                         global_step = it
                                         )
@@ -326,6 +326,16 @@ class FBSNN(ABC):
             self.optimizer.zero_grad()  # Zero the gradients again to ensure correct gradient accumulation
             loss.backward()  # Compute the gradients of the loss w.r.t. the network parameters
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+
+            # Oscar code: Adding tensorboard logging
+            if it:
+                if it % 100 ==0:
+                    for name, param in self.model.named_parameters():
+                        if param.grad is not None:
+                            name_split = name.split('.')
+                            tb_writer.add_histogram(f'Layer {name_split[0]}/{name_split[1]}_grad', param.grad, it)
+                            tb_writer.close()
             
             self.optimizer.step()  # Update the network parameters based on the gradients
 
@@ -350,14 +360,17 @@ class FBSNN(ABC):
                 loss_temp = np.array([])  # Reset the temporary loss array
                 self.iteration.append(it)  # Append the current iteration number
         
+            # Write to TensorBoard: Predicted Y0
             if it % 100 == 0:
                 # Log Y0 Pred
-                tb_writer.add_scalar(tag = 'Y0_pred',
+                tb_writer.add_scalar(tag = 'Model_Output/Predicted Y at t=0',
                                      scalar_value = Y0_pred,
                                      global_step = it
                                      )
-                tb_writer.add_histogram(tag = 'All_Y_pred',
-                                        values = Y_pred,
+            if it % 1000 == 0:
+                # previously logged Y_pred
+                tb_writer.add_histogram(tag = "Model_Output/Mean predicted Y across paths at each time-step",
+                                        values = torch.mean(Y_pred, dim = 0),
                                         global_step = it
                                         )
 

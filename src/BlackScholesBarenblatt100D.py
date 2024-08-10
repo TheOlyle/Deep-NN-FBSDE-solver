@@ -56,9 +56,9 @@ def run_model(model, N_Iter, learning_rate):
 
     np.random.seed(42)
     # Retriev the set of t and Brownian Motions
-    t_test, W_test = model.fetch_minibatch()
+    t_test, W_test = model.fetch_minibatch() # M x (N+1) x 1, M x (N+1) x 1
     # Retrieve the NN-predicted values given our simulation values of t & Brownian motion W
-    X_pred, Y_pred = model.predict(Xi, t_test, W_test)
+    X_pred, Y_pred = model.predict(Xi, t_test, W_test) # M x (N+1) x 1, M x (N+1) x 1
 
     if type(t_test).__module__ != 'numpy':
         t_test = t_test.cpu().numpy()
@@ -69,6 +69,7 @@ def run_model(model, N_Iter, learning_rate):
 
 
     # Retrieve the EXACT Black-Scholes-B solution to test the output of the model against
+    # This ends up being M x (N+1) x 1
     Y_test = np.reshape(u_exact(np.reshape(t_test[0:M, :, :], [-1, 1]), np.reshape(X_pred[0:M, :, :], [-1, D])),
                         [M, -1, 1])
 
@@ -134,4 +135,4 @@ if __name__ == "__main__":
                                    M, N, D,
                                    layers, mode, activation)
     
-    run_model(model, 300, 1e-3)
+    run_model(model, 1000, 1e-3)

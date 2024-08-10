@@ -20,18 +20,21 @@ from src.utils import (
     NegRelu
 )
 
-# TensorBoard config: change for different experiments
-tb_writer = SummaryWriter(log_dir = 'runs/Barrier_Call1D/dev2')
+# random seed set:
+np.random.seed(seed=42)
+torch.manual_seed(seed = 42)
 
 # Logging configuration
 logging.basicConfig(format = '%(asctime)s - %(name)s - %(message)s',
                     level = logging.DEBUG,
                     handlers = [logging.StreamHandler(sys.stdout)]
                     )
+
 _logger = logging.getLogger(__name__)
 
 class FBSNN_barrier(ABC):
-    def __init__(self, Xi, T, M, N, D, Mm, strike, layers, mode, activation, N_iter, learning_rate
+    def __init__(self, Xi, T, M, N, D, Mm, strike, layers, mode, activation, N_iter, learning_rate,
+                 tb_log: str, # Name to pass to tb_log
                  domain_barrier = None, basket_measurement = None, barrier_style =  None, rebate = None,
                  penalise_neg_Y = False # Miscellaneous parameters for how to action the NN.
                  ):
@@ -50,7 +53,7 @@ class FBSNN_barrier(ABC):
         # activation: Activation function to be used in the neural network
 
         # Oscar Parameters:
-        # Learning rate: if 'dynamic' use a dynamic learning rate, otherwise static learning rate
+        # Learning rate: if 'dynamic' use a dynamic learning rate, otherwise static learning rate.
 
         # Check if CUDA is available and set the appropriate device (GPU or CPU)
         device_idx = 0
@@ -92,7 +95,7 @@ class FBSNN_barrier(ABC):
         # Sense-checks
         if self.basket_measurement == 'Single': assert self.D == 1
 
-        # Loss-modifying attributes
+        # Loss-modifying attributes & Miscellaneous Hyperparametrs
         self.penalise_neg_Y = penalise_neg_Y
         self.N_iter = N_iter
         self.learning_rate =  learning_rate
@@ -118,6 +121,9 @@ class FBSNN_barrier(ABC):
 
         # Apply a custom weights initialization to the model
         self.model.apply(self.weights_init)
+
+        # Initialising tensorboard as an attribute
+        self.tb_writer = SummaryWriter(log_dir = tb_log)
 
         # TensorBoard: add hyperaparameters
         tb_writer.add_hparams(hparam_dict = {"Xi":round(self.Xi.item(), 4),
@@ -335,7 +341,7 @@ class FBSNN_barrier(ABC):
             # NOTE: can also include some measure of loss derived from 'in-out' Parity OR using Yu et al's more mathematical approach?
             # To be determined if this loss should occur at each time-step or not, only at the very end. It makes sense to make this for each timestep
             # For now, I'm not going to implement this - need to make sure I can get Ganesan et al's methodology to work, and can then extend
-            loss += 0
+            # loss += 0
 
             # Sometimes, the NN's prediction of Y1 can be negative. Therefore, we couuld try to speed up convergence by introducing
             # strong penalties in the loss function for negative values of Y1?
@@ -366,6 +372,9 @@ class FBSNN_barrier(ABC):
 
         # At THIS point, I should log g_tf() & Dg_tf() in TensorBoard. May as well also log Y1 & Z1
         # However, to do this, I need a unique identifier for this epoch: I should pass 'it' as an argument to loss function
+
+        # Hook for comparison of tFP, XFP, C & original payoff variables X1
+
         if it % 100 == 0:
             tb_writer.add_histogram(tag = 'Model_Output/Dg_tf at T',
                                     values = self.Dg_tf(tFP = tFP, XFP = XFP),
@@ -375,16 +384,25 @@ class FBSNN_barrier(ABC):
                                     values = self.g_tf(tFP = tFP, XFP = XFP),
                                     global_step = it
                                     )
-            tb_writer.add_histogram(tag = 'Model_Output/Y_pred at T',
+            tb_writer.add_histogram(tag = 'Model_Output/Y1 at T',
                                     values = Y1,
                                     global_step = it
                                     )
+            tb_writer.add_scalar(tag = "Model_Output/Average % of iterations which hit barrier, across dimensions",
+                                 scalar_value = torch.sum(C, dim = 0)/ C.shape[0],
+                                 global_step = it
+                                 )
             tb_writer.close()
 
 
         # Create a list of Euler-derived X values & list of NN-derived Y-values
         X = torch.stack(X_list, dim=1)
         Y = torch.stack(Y_list, dim=1)
+
+        # Get a sample of what's happening
+        # if it == 8000:
+        #   self.tb_writer.add_scalar(...)
+
 
         # Return the loss and the states and outputs at each time step
         # This is Loss, Euler-X & NN-Y values, and
@@ -399,6 +417,9 @@ class FBSNN_barrier(ABC):
         # It makes sense to think of minibatches as different realisations of Brownian Motion
         # Returns:
         #   overall entire set of paths of t and Brownian Motion W.
+
+        # Can implement Antithetic Variates here! Perhaps also Sobol Sequences...
+
 
         T = self.T  # Terminal time
         M = self.M  # Number of trajectories (batch size)
@@ -507,8 +528,10 @@ class FBSNN_barrier(ABC):
                     if param.grad is not None:
                         # Add a Hook here to debug issues with gradients.
                         name_split = name.split('.')
-                        tb_writer.add_histogram(f'Layer {name_split[0]}/name_split[1]_grad', param.grad, it)
-                tb_writer.close()
+                        self.tb_writer.add_histogram(f'Layer {name_split[0]}/name_split[1]_grad', param.grad, it)
+                self.tb_writer.close()
+
+
             self.optimizer.step()  # Update the network parameters based on the gradients
 
             # Store the current loss value for later averaging - loss_temp is our store of the loss
@@ -526,39 +549,38 @@ class FBSNN_barrier(ABC):
             # self.training_loss
             if it % 100 == 0:
                 self.training_loss.append(loss_temp.mean())  # Append the average loss
-                tb_writer.add_scalar(tag = 'Running loss',
+                self.tb_writer.add_scalar(tag = 'Running loss',
                                      scalar_value = loss_temp.mean(),
                                      global_step = it
                                      )
-                tb_writer.close()
+                self.tb_writer.close()
                 loss_temp = np.array([])  # Reset the temporary loss array
                 self.iteration.append(it)  # Append the current iteration number
 
             # Log to TensorBoard:
             if it % 100 == 0:
                 # Log Y0_pred
-                tb_writer.add_scalar(tag = 'Model_Output/Y0_pred',
+                self.tb_writer.add_scalar(tag = 'Model_Output/Predicted Y at t=0',
                                      scalar_value = Y0_pred,
                                      global_step = it
                                      )
-                tb_writer.add_histogram(tag = 'Model_Output/Mean predicted Y across paths at each time-step',
+            if it % 1000 ==0: # less frequent logging
+                self.tb_writer.add_histogram(tag = 'Model_Output/Mean predicted Y across paths at each time-step',
                                         values = torch.mean(Y_pred, dim = 0),
                                         global_step = it
                                         )
-                tb_writer.close()
+                self.tb_writer.close()
 
-        tb_writer.flush() # good practice to flush at end of training.
+            self.tb_writer.flush() # good practice to flush at end of training.
         
-        _logger.debug("finished training")
-        
-
-        # Stack the iteration and training loss for plotting
-        graph = np.stack((self.iteration, self.training_loss))
+    
+            # Stack the iteration and training loss for plotting
+            graph = np.stack((self.iteration, self.training_loss))
 
         # Return the training history (iterations and corresponding losses)
         return graph
 
-    def predict(self, Xi_star, t_star, W_star):
+    def predict(self, Xi_star, t_star, W_star, C, tFP, XFP):
         # Predicts the output of the neural network
         # Parameters:
         # Xi_star: The initial state for the prediction, given as a numpy array
@@ -570,7 +592,14 @@ class FBSNN_barrier(ABC):
         Xi_star.requires_grad = True
 
         # Compute the loss and obtain predicted states (X_star) and outputs (Y_star) using the trained model
-        loss, X_star, Y_star, Y0_pred = self.loss_function(t_star, W_star, Xi_star)
+        loss, X_star, Y_star, Y0_pred = self.loss_function(t=t_star,
+                                                           W=W_star,
+                                                           Xi=Xi_star,
+                                                           it = 1, # setting it = 1 will prevent any tensorboard logging & avoid raising any errors
+                                                           C = C, 
+                                                           tFP = tFP,
+                                                           XFP = XFP
+                                                           )
 
         # Return the predicted states and outputs
         # These predictions correspond to the neural network's estimation of the state and output at each time step
